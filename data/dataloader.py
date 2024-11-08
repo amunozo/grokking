@@ -32,7 +32,7 @@ try:
                              l.startswith("#")]
 except Exception as e:
     print("couldnt find extra dataloader paths")
-    datamodules_paths = "../datamodules"
+    datamodules_paths = ["../datamodules"]
 
 
 @dataclass
@@ -116,6 +116,9 @@ def get_data(data_params):
         samples = wikitextloader()
     elif data_params.dataset_name == "ptb":
         samples = ptbloader()
+    elif "comparison" or "composition" in data_params.dataset_name:
+        samples = grokreader(datapath + "/grokked_transformers/"
+                              + data_params.dataset_name)
     elif data_params.is_synthetic_task:
         samples = syntheticdatasets.get(data_params.dataset_name)
     elif None is not get_local_datafolder(data_params.dataset_name):
@@ -423,8 +426,7 @@ class LMDataModule(pl.LightningDataModule):
 def ptbloader():
     d = datasets.load_dataset("ptb_text_only")
     d = {n: d[n]["sentence"] for n in d}
-    return d  # see if this works
-
+    return d  # see if this works    
 
 def wikitextloader():
     d = datasets.load_dataset("wikitext", "wikitext-103-v1")
@@ -452,6 +454,14 @@ def wikitextloader():
 
     return {n: regroup_page_lines(d[n]) for n in d}
 
+def grokreader(path):
+    paths = glob_nosquares(f"{path}/*.txt")
+    d = {}
+    for p in paths:
+        split = p.split("/")[-1].replace(".txt", "")
+        with open(p, "r") as f:
+            d[split] = f.readlines()
+    return d
 
 def verysimplesamplesreader(path, data_params):
     paths = glob_nosquares(f"{path}/*.txt")

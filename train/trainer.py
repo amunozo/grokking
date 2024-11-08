@@ -3,11 +3,12 @@ import torch
 import wandb
 from time import process_time
 from util import printer_print as print
+from torch.optim import AdamW
 
 
 class Trainer(pl.LightningModule):
     def __init__(self, model, train_params, start_time=None,
-                 samples_at_validation=True):
+                 samples_at_validation=True, expected_batches_per_epoch=None):
         super().__init__()
         self.model = model
         self.train_params = train_params
@@ -33,6 +34,8 @@ class Trainer(pl.LightningModule):
         self.last_checkpoint_i = -1
         self.last_checkpoint_nsamples = -1
         self.stat_syncer = 0
+        self.expected_batches_per_epoch = expected_batches_per_epoch
+        self.weight_norms = self.get_weight_norms()
         self.log_stat("n_train_samples", self.n_train_samples)
         self.log_stat("n_train_batches", self.n_train_batches)
         self.log_stat("n_opt_steps", self.n_opt_steps)
@@ -188,11 +191,14 @@ class Trainer(pl.LightningModule):
         self.log("train_batch_loss", losses["main"].item())
         # for the lr scheduler
 
+        self.weight_norms = self.get_weight_norms()
+
         self.log_stat("avg_lr", self.curr_avg_lr())
         self.log_stat("n_train_samples", self.n_train_samples)
         self.log_stat("n_train_batches", self.n_train_batches)
         self.log_stat("n_opt_steps", self.n_opt_steps)
-
+        self.log_stat("weight_norms", self.weight_norms)
+        
         self.manual_backward(losses["main"])
         self.maybe_step_opt_and_lr(batch_idx)
 
@@ -225,42 +231,81 @@ class Trainer(pl.LightningModule):
         elif self.train_params.lr_scheduler_type == 'Cyclic':
             sched = torch.optim.lr_scheduler.CyclicLR
             return sched(optimizer, base_lr=self.train_params.min_lr,
-                         max_lr=self.train_params.lr,
-                         step_size_up=self.train_params.lr_cycle_steps // 2,
-                         mode='triangular',
-                         gamma=self.train_params.scheduler_factor,
-                         cycle_momentum=False)
+                        max_lr=self.train_params.lr,
+                        step_size_up=self.train_params.lr_cycle_steps // 2,
+                        mode='triangular',
+                        gamma=self.train_params.scheduler_factor,
+                        cycle_momentum=False)
         elif self.train_params.lr_scheduler_type == 'Cosine':
             sched = torch.optim.lr_scheduler.CosineAnnealingLR
             return sched(optimizer, self.train_params.lr_cycle_steps,
-                         eta_min=self.train_params.min_lr)
+                        eta_min=self.train_params.min_lr)
+        elif self.train_params.lr_scheduler_type == 'Linear':
+            sched = torch.optim.lr_scheduler.LinearLR
+            total_iters = self.train_params.epochs * self.expected_batches_per_epoch * \
+                self.train_params.accumulate_grad_batches - self.train_params.lr_warm_steps
+            return sched(optimizer, start_factor=1.0,
+                        end_factor=self.train_params.min_lr / self.train_params.lr,
+                        total_iters=total_iters)
         else:
             raise Exception("unknown scheduler type:",
                             self.train_params.lr_scheduler_type)
+
 
     def reconfigure_optimizers(self):
         optimizers, _ = self.configure_optimizers(
             existing_scheduler=self.lr_schedulers())
         self.optimizers()._optimizer = optimizers[0]
-
+    
+    def get_optimizer_params(self, weight_decay):
+        decay_params = []
+        no_decay_params = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue  # Exclude frozen parameters
+            if "bias" in name or "LayerNorm.weight" in name or "LayerNorm.bias" in name:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        return [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+    
     def configure_optimizers(self, existing_scheduler=None):
-        optimizer = torch.optim.Adam(self.parameters(),
-                                     lr=self.train_params.lr)
+        weight_decay = self.train_params.weight_decay
+
+        if weight_decay > 0:
+            optimizer_grouped_parameters = self.get_optimizer_params(weight_decay)
+            optimizer = AdamW(optimizer_grouped_parameters, lr=self.train_params.lr)
+        else:
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params.lr)
 
         def f_warmup(n):
-            assert n <= self.train_params.lr_warm_steps
-            return n / self.train_params.lr_warm_steps
-
+            if self.train_params.lr_warm_steps > 0:
+                return min(n / self.train_params.lr_warm_steps, 1.0)
+            else:
+                return 1.0
+        
         s_warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, f_warmup)
         s_main = self.make_main_scheduler(optimizer)
-        s_full = MyChainedScheduler() if None is existing_scheduler else \
-            existing_scheduler
+        s_full = MyChainedScheduler() if existing_scheduler is None else existing_scheduler
         s_full.setup(optimizer, [s_warmup, s_main],
-                     milestones=[self.train_params.lr_warm_steps])
-        # get scheduler started, else first batch has max value apparently
+                    milestones=[self.train_params.lr_warm_steps])
         s_full.step(None)
         s_main = {"scheduler": s_full}
+
         return [optimizer], [s_main]
+
+
+    def get_weight_norms(self):
+        total_norm = 0
+        for p in self.model.parameters():
+            if p.requires_grad:
+                param_norm = p.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        return total_norm
 
 
 class MyChainedScheduler:

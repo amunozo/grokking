@@ -144,25 +144,35 @@ class LM(nn.Module):
 
     def get_losses(self, batch, loss_requests=None, accs_too=False):
         x, y, z = self.get_batch_xyz(batch, loss_requests=loss_requests)
-        z, y = z.view(-1, self.n_tokens), y.reshape(-1)
-        main_loss = self.celoss(z, y)
+        y_masked = y.clone()
+        y_masked[:, :-2] = self.ignore_index
+        y_masked[:, -1] = self.ignore_index
+        # mask everything except for the second-to-last item, 
+        # which is what we want to predict
+
+        z, y_masked = z.view(-1, self.n_tokens), y_masked.reshape(-1)
+        main_loss = self.celoss(z, y_masked)
         losses = {"main": main_loss}
         if accs_too:
-            y_mask = y != self.ignore_index
-            z_match = z.argmax(dim=-1) == y
-            correct = torch.logical_and(z_match, y_mask).sum()
-            count = y_mask.sum()
-            accs = {"main": (correct / count).item()}
-        res = {"loss": losses, "acc": accs} if accs_too else losses
+            y_mask = y_masked != self.ignore_index  
+            z_pred = z.argmax(dim=-1)               
+            z_match = z_pred == y_masked            
+            correct = torch.logical_and(z_match, y_mask).sum() 
+            count = y_mask.sum()                              
+            accs = {"main": (correct / count).item()}  
+            res = {"loss": losses, "acc": accs} if accs_too else losses
         return res, x.shape[0]  # num samples
 
     def batch_perplexities(self, batch, before_exp=False):
         x, y, z = self.get_batch_xyz(batch)
         z = z.detach()
+        y_masked = y.clone()
+        y_masked[:, :-2] = self.ignore_index
+        y_masked[:, -1] = self.ignore_index
         loss_fn = nn.CrossEntropyLoss(reduction="none",
                                       ignore_index=self.ignore_index)
         losses = loss_fn(z.view(-1, self.n_tokens),
-                         y.reshape(-1)).view(y.shape)
+                         y_masked.reshape(-1)).view(y_masked.shape)
         losses = losses.detach()
         res = losses if before_exp else torch.exp(losses)  # perplexity: e^loss
 

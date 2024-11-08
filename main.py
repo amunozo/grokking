@@ -22,6 +22,8 @@ from time import process_time, sleep
 import os
 from os.path import join as path_join
 import sys
+import numpy as np
+import random
 
 # not trying to parallelize the tokenizer, i tokenize everything first and then
 # load tokens (not sequences) later. (may want to change this in future, if
@@ -42,10 +44,11 @@ parser.add_argument('--gpu-id', type=int, default=None)
 # for internal debug use (can be passed to get_exception at the bottom here):
 parser.add_argument('--return-things', type=bool, default=False)
 parser.add_argument('--keep-datamodule', action='store_true')
+parser.add_argument('--random_seed', type=int, default=None, help='Random seed for reproducibility')
 
 
-MAIN_PROJ = "base"  # project name for wandb runs
-wandb_username = "gail_weiss"
+MAIN_PROJ = "grokking"  # project name for wandb runs
+wandb_username = "amunozo"
 
 
 class Namer:
@@ -80,6 +83,31 @@ class Namer:
         return f"{self.args.config}/{self.dp.dataset_name}/" +\
                f"{wn}{self.timestamp}"
 
+
+def seed_everything(args_seed, tp):
+    if None is not args_seed:
+        tp.random_seed = args_seed # i.e., args_seed is stronger than config, if set
+    if None is tp.random_seed: 
+        tp.random_seed = random.randint(0,2**32 -1 )
+    seed = tp.random_seed
+
+    pl.seed_everything(seed)
+    
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
+
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    return seed
 
 def build_full(dp, tp, mp):
     full = {}
@@ -138,8 +166,10 @@ def train(args, lm, dataset, tp, dp, saving_folder):
         # device, else it runs all of main.py n_devices times (????).
         # presumably its for multi-gpu training but i haven't learned how yet
         max_epochs=tp.epochs, val_check_interval=tp.val_check_epoch_frac)
-
-    mytrainer = Trainer(lm, tp, start_time=start_time)
+    
+    mytrainer = Trainer(lm, tp, 
+                        expected_batches_per_epoch=len(dataset.train_dataloader(tp.batch_size)), 
+                        start_time=start_time)
     mytrainer.prepare_saver(dp, saving_folder, save_model_)
 
     pltrainer.fit(mytrainer, dataset.train_dataloader(tp.batch_size),
@@ -208,6 +238,7 @@ def save_model(args, saving_folder, pltrainer, dp, tp):
 
 
 def run_config(args, dp, tp, mp, namer):
+    seed = seed_everything(args.random_seed, tp)
     full_params = build_full(dp, tp, mp)
     run, run_name, run_loc = setup_wandb(args, tp, full_params, namer)
     saving_folder = f"../saved-models/{namer.save_folder_name(run_name)}"
@@ -280,6 +311,7 @@ def get_args(arg_bits_list):
 
 
 def run_main(arg_bits_list=None):
+    torch.autograd.set_detect_anomaly(True)
     args = get_args(arg_bits_list)
     namer = Namer(args)
     print("got config name:", args.config)

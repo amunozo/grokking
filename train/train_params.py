@@ -24,6 +24,8 @@ class TrainParams:
     lora_std: float = 0.02
     checkpoint_every: int = 0
     early_stop_nsamples: int = -1
+    weight_decay: float = 0.01
+    random_seed: None = None
 
 # batch_size:
 #   The batch size used for the training and validation sets
@@ -79,6 +81,10 @@ class TrainParams:
 #           learning rate lr and reduces the learning rate by scheduler_factor
 #           every time the train batch loss ceases improving for patience
 #           steps, reducing the learning rate only up to min_lr.
+#       "Linear":
+#           Uses torch.optim.lr_scheduler.LinearLR. Starts from lr and decreases
+#           the learning rate linearly down to min_lr over the course of
+#           training steps, as defined by the total training duration.
 # min_lr:
 #   The minimum learning rate the scheduler may set in training
 # scheduler_factor:
@@ -101,3 +107,7 @@ class TrainParams:
 #   overridden to 0.
 # early_stop_nsamples:
 #   When >0, the number of batches to train before early stopping the training.
+# weight_decay:
+#   Weight decay to apply to the optimizer.
+# seed:
+#   Random seed for reproducibility
