@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
-from data.dataloader import DataParams
-from model.model_params import ModelParams
+from data.data_params import make_dp, DataParams
+from model.model_params import make_mp, ModelParams
 from model.lm import LM
 from train.trainer import Trainer
-from train.train_params import TrainParams
+from train.train_params import make_tp, TrainParams
 import lightning as pl
 import argparse
 from dataclasses import asdict
 import wandb
-from util import get_timestamp, print_nicely_nested, in_try, \
+from util import get_probably_unique, print_nicely_nested, in_try, \
                  prepare_directory, printer, glob_nosquares
 from util import printer_print as print
 from save_load import save_model as save_model_
@@ -24,6 +24,7 @@ from os.path import join as path_join
 import sys
 import numpy as np
 import random
+
 
 # not trying to parallelize the tokenizer, i tokenize everything first and then
 # load tokens (not sequences) later. (may want to change this in future, if
@@ -65,7 +66,7 @@ class Namer:
 
     def set_config(self, dp, tp, mp):
         self.dp, self.tp, self.mp = dp, tp, mp
-        self.timestamp = get_timestamp()
+        self.identifier = get_probably_unique()
 
     def wandb_proj_name(self):
         specific = self.args.config if None is self.args.wandb_proj_name \
@@ -81,26 +82,23 @@ class Namer:
         # given run name might have come from wandb so need to receive it
         wn = "" if None is given_run_name else f"{given_run_name}/"
         return f"{self.args.config}/{self.dp.dataset_name}/" +\
-               f"{wn}{self.timestamp}"
+               f"{wn}{self.identifier}"
 
 
 def seed_everything(args_seed, tp):
-    if None is not args_seed:
-        tp.random_seed = args_seed # i.e., args_seed is stronger than config, if set
-    if None is tp.random_seed: 
-        tp.random_seed = random.randint(0,2**32 -1 )
-    seed = tp.random_seed
+    seed = args_seed
+    if None is seed:
+        seed = tp.random_seed # i.e., args_seed is stronger than config, if set
+    if None is seed: 
+        seed = random.randint(0,2**32 -1 )
 
     pl.seed_everything(seed)
-    
     torch.manual_seed(seed)
-    
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(seed)
-
     np.random.seed(seed)
     random.seed(seed)
     
@@ -108,6 +106,7 @@ def seed_everything(args_seed, tp):
     torch.backends.cudnn.benchmark = False
     
     return seed
+
 
 def build_full(dp, tp, mp):
     full = {}
@@ -139,18 +138,11 @@ def read_config(config_filename):
 
 
 def get_params(config_filename):
-    dp = DataParams()
-    tp = TrainParams()
-    mp = ModelParams()
     overwrites = read_config(config_filename)
-    for params, news, name in [(dp, overwrites["DataParams"], "dp"),
-                               (tp, overwrites["TrainParams"], "tp"),
-                               (mp, overwrites["ModelParams"], "mp")]:
-        for k, v in news.items():
-            fail_str = f"tried to write param {k,v} to {name}," +\
-                        "but it has no such attribute"
-            assert k in dir(params), fail_str
-            setattr(params, k, v)
+    dp = make_dp(**overwrites["DataParams"], convert_lists_to_tuples=False)
+    tp = make_tp(**overwrites["TrainParams"], convert_lists_to_tuples=False)
+    mp = make_mp(**overwrites["ModelParams"], convert_lists_to_tuples=False)
+    assert None not in [dp, tp, mp]
     return dp, tp, mp
 
 
@@ -166,13 +158,14 @@ def train(args, lm, dataset, tp, dp, saving_folder):
         # device, else it runs all of main.py n_devices times (????).
         # presumably its for multi-gpu training but i haven't learned how yet
         max_epochs=tp.epochs, val_check_interval=tp.val_check_epoch_frac)
-    
+
+    tdl = dataset.train_dataloader(tp.batch_size)
     mytrainer = Trainer(lm, tp, 
-                        expected_batches_per_epoch=len(dataset.train_dataloader(tp.batch_size)), 
+                        train_dataloader_nbatches=len(tdl), 
                         start_time=start_time)
     mytrainer.prepare_saver(dp, saving_folder, save_model_)
 
-    pltrainer.fit(mytrainer, dataset.train_dataloader(tp.batch_size),
+    pltrainer.fit(mytrainer, tdl,
                   dataset.val_dataloader(tp.batch_size))
     pltrainer.validate(mytrainer,
                        dataloaders=dataset.val_dataloader(tp.batch_size))
@@ -238,7 +231,8 @@ def save_model(args, saving_folder, pltrainer, dp, tp):
 
 
 def run_config(args, dp, tp, mp, namer):
-    seed = seed_everything(args.random_seed, tp)
+    tp = deepcopy(tp)
+    tp.random_seed = seed_everything(args.random_seed, tp)
     full_params = build_full(dp, tp, mp)
     run, run_name, run_loc = setup_wandb(args, tp, full_params, namer)
     saving_folder = f"../saved-models/{namer.save_folder_name(run_name)}"
@@ -288,6 +282,10 @@ def get_config_filenames(config_name):
 
 
 def run_all(args, dp, tp, mp, namer):
+    # dp, tp, mp have been manipulated on the way here, remake to be sure
+    dp = make_dp(**asdict(dp), redo_synth_eval=True)
+    tp = make_tp(**asdict(tp))
+    mp = make_mp(**asdict(mp))
     namer.set_config_ablation("main")
     namer.set_config(dp, tp, mp)
     if args.no_wandb:

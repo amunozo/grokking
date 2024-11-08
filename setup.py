@@ -2,9 +2,9 @@ from model.transformer.transformer import Transformer
 from create import make_model
 from save_load import load_model, get_datamodule
 from model_explorer import get_full_path
-from data.dataloader import DataParams
-from model.model_params import ModelParams
-from train.train_params import TrainParams
+from data.data_params import make_dp
+from model.model_params import make_mp
+from train.train_params import make_tp
 from util import printer_print as print
 
 
@@ -29,8 +29,8 @@ def setup_model_and_data(data_params, model_params, train_params, verbose=True,
     load_res = {}
     if loading:
         if model_params.from_saved:
-            p = get_full_path(timestamp, checkpoint=checkpoint)
-            assert None is not p, f"didn't find path for timestamp {timestamp}"
+            p = get_full_path(identifier, checkpoint=checkpoint)
+            assert None is not p, f"didn't find path for identifier {identifier}"
             load_res = load_model(p, full=True, verbose=verbose, 
                                   with_data=not skip_data)
             dataset = load_res["dataset"]
@@ -47,7 +47,7 @@ def setup_model_and_data(data_params, model_params, train_params, verbose=True,
     if (None is dataset) and not skip_data:
         # model params already been synced, can use them for the datamodule
         dataset = get_datamodule(data_params, model_params, verbose=verbose,
-                                 keep_datamodule=keep_datamodule)
+            keep_datamodule=keep_datamodule)
         
     if not loading:  # ie, making
         assert not skip_data  # need data to determine the tokenizer
@@ -56,8 +56,7 @@ def setup_model_and_data(data_params, model_params, train_params, verbose=True,
     return lm, dataset
 
 
-def quick_data_grab(dataset_name, tokenizer_source_name="gpt2", verbose=False):
-    dp = DataParams(dataset_name=dataset_name, debug_crop=500)
-    mp = ModelParams(tokenizer_source_name=tokenizer_source_name)
-    tp = TrainParams()
+def quick_data_grab(dataset_name, tokenizer_source_name="gpt2", verbose=False, max_seq_len=200):
+    dp = make_dp(dataset_name=dataset_name, debug_crop=500)
+    mp = make_mp(tokenizer_source_name=tokenizer_source_name, max_seq_len=max_seq_len)
     return get_datamodule(dp, mp, verbose=verbose, keep_datamodule=False)

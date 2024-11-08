@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from util import apply_dataclass
 
 
 @dataclass
@@ -25,7 +26,15 @@ class TrainParams:
     checkpoint_every: int = 0
     early_stop_nsamples: int = -1
     weight_decay: float = 0.01
-    random_seed: None = None
+    random_seed: int = None
+
+
+def make_tp(forgiving=False, takes_extras=False, convert_lists_to_tuples=False,
+            **d):
+    return apply_dataclass(TrainParams, d, forgiving=forgiving,
+                           convert_lists_to_tuples=convert_lists_to_tuples)
+    # ready for fixes over time
+
 
 # batch_size:
 #   The batch size used for the training and validation sets
@@ -109,5 +118,6 @@ class TrainParams:
 #   When >0, the number of batches to train before early stopping the training.
 # weight_decay:
 #   Weight decay to apply to the optimizer.
-# seed:
-#   Random seed for reproducibility
+# random_seed:
+#   Random seed for reproducibility. This value can also be overwritten by
+#   setting the random seed arg in the main.py script.

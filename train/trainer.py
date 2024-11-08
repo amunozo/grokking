@@ -8,7 +8,8 @@ from torch.optim import AdamW
 
 class Trainer(pl.LightningModule):
     def __init__(self, model, train_params, start_time=None,
-                 samples_at_validation=True, expected_batches_per_epoch=None):
+                 samples_at_validation=True, 
+                 train_dataloader_nbatches=None):
         super().__init__()
         self.model = model
         self.train_params = train_params
@@ -34,8 +35,9 @@ class Trainer(pl.LightningModule):
         self.last_checkpoint_i = -1
         self.last_checkpoint_nsamples = -1
         self.stat_syncer = 0
-        self.expected_batches_per_epoch = expected_batches_per_epoch
-        self.weight_norms = self.get_weight_norms()
+        self.curr_epoch = -1
+        self.val_count_in_epoch = -1
+        self.train_dataloader_nbatches = train_dataloader_nbatches
         self.log_stat("n_train_samples", self.n_train_samples)
         self.log_stat("n_train_batches", self.n_train_batches)
         self.log_stat("n_opt_steps", self.n_opt_steps)
@@ -91,6 +93,12 @@ class Trainer(pl.LightningModule):
         if None is not self.start_time:
             self.log_stat("process_time", process_time() - self.start_time)
 
+    def on_train_epoch_start(self):
+        self.curr_epoch += 1
+        self.val_count_in_epoch = -1
+        print("starting epoch:",self.curr_epoch)
+        self.logged_epoch_count_yet = False
+
     def on_train_epoch_end(self):
         # note that averaging accs will give "average batch accuracy" but not
         # actual full dataset accuracy (as batches may have different numbers
@@ -102,11 +110,13 @@ class Trainer(pl.LightningModule):
                 self.log_stat(f"stat/train_{sn}:{t}", wary_mean(stats))
             self.curr_train_stats_by_type[sn] = {}
         self.maybe_save_checkpoint(after_train_epoch=True)
+        self.log_stat("n_epochs", self.curr_epoch)
 
     def on_validation_epoch_end(self):
         # note that averaging accs will give "average batch accuracy" but not
         # actual full dataset accuracy (as batches may have different numbers
         # of tokens)
+        self.val_count_in_epoch += 1
         self.log_time()
         main = self.curr_val_stats_by_type["loss"]["main"]
         for sn in self.curr_val_stats_by_type:
@@ -116,9 +126,13 @@ class Trainer(pl.LightningModule):
             self.curr_val_stats_by_type[sn] = {}
 
         val_loss = wary_mean(main)
+
+        print(f"\n {'='*20} \n epoch [{self.curr_epoch}] val cycle",
+              f"[{self.val_count_in_epoch}] val loss: [{val_loss}]",
+              f"\n {'='*20} \n ")
         self.last_val_loss = val_loss  # might want this e.g. in model_explorer
         if self.samples_at_validation:
-            print("====\ncurrent val loss:", val_loss, ", sampling: ====")
+            print("=== sampling: ===")
             sample = self.model.sample(
                         max_seq_len=self.train_params.max_sample_tokens,
                         temperature=self.train_params.sample_temperature)
@@ -196,8 +210,11 @@ class Trainer(pl.LightningModule):
         self.log_stat("avg_lr", self.curr_avg_lr())
         self.log_stat("n_train_samples", self.n_train_samples)
         self.log_stat("n_train_batches", self.n_train_batches)
+        if not self.logged_epoch_count_yet:
+            self.log_stat("n_epochs", self.curr_epoch)
+            self.logged_epoch_count_yet = True
         self.log_stat("n_opt_steps", self.n_opt_steps)
-        self.log_stat("weight_norms", self.weight_norms)
+        self.log_stat("weight_norms", self.get_weight_norms())
         
         self.manual_backward(losses["main"])
         self.maybe_step_opt_and_lr(batch_idx)
@@ -239,14 +256,16 @@ class Trainer(pl.LightningModule):
         elif self.train_params.lr_scheduler_type == 'Cosine':
             sched = torch.optim.lr_scheduler.CosineAnnealingLR
             return sched(optimizer, self.train_params.lr_cycle_steps,
-                        eta_min=self.train_params.min_lr)
+                         eta_min=self.train_params.min_lr)
         elif self.train_params.lr_scheduler_type == 'Linear':
             sched = torch.optim.lr_scheduler.LinearLR
-            total_iters = self.train_params.epochs * self.expected_batches_per_epoch * \
-                self.train_params.accumulate_grad_batches - self.train_params.lr_warm_steps
+            expected_main_scheduler_steps = (
+                (self.train_params.epochs * self.train_dataloader_nbatches) // 
+                self.train_params.accumulate_grad_batches
+            ) - self.train_params.lr_warm_steps
             return sched(optimizer, start_factor=1.0,
-                        end_factor=self.train_params.min_lr / self.train_params.lr,
-                        total_iters=total_iters)
+                         end_factor=self.train_params.min_lr / self.train_params.lr,
+                         total_iters=expected_main_scheduler_steps)
         else:
             raise Exception("unknown scheduler type:",
                             self.train_params.lr_scheduler_type)
@@ -256,30 +275,38 @@ class Trainer(pl.LightningModule):
         optimizers, _ = self.configure_optimizers(
             existing_scheduler=self.lr_schedulers())
         self.optimizers()._optimizer = optimizers[0]
-    
+
     def get_optimizer_params(self, weight_decay):
+        # note: if ever add freezing into this code, will have to update
+        # code here to avoid sending frozen parameters into the optimizer:
+        # e.g. i think optimizers with weight decay will apply it even to
+        # frozen parameters
+        if weight_decay <= 0:
+            return self.parameters()
         decay_params = []
         no_decay_params = []
+
         for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue  # Exclude frozen parameters
-            if "bias" in name or "LayerNorm.weight" in name or "LayerNorm.bias" in name:
-                no_decay_params.append(param)
-            else:
+            if self.model.in_main_part(name) and \
+               self.model.not_layernorm(name) and \
+               not name.endswith("bias"):
+                # each class uses different parameter names,
+                # best to have them self report what should be weight decayed
                 decay_params.append(param)
+            else:
+                no_decay_params.append(param)
         return [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': no_decay_params, 'weight_decay': 0.0}
         ]
-    
+
     def configure_optimizers(self, existing_scheduler=None):
         weight_decay = self.train_params.weight_decay
 
-        if weight_decay > 0:
-            optimizer_grouped_parameters = self.get_optimizer_params(weight_decay)
-            optimizer = AdamW(optimizer_grouped_parameters, lr=self.train_params.lr)
-        else:
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params.lr)
+        optimizer_params = self.get_optimizer_params(weight_decay)
+        optimizerClass = torch.optim.AdamW if weight_decay > 0 else \
+            torch.optim.Adam
+        optimizer = optimizerClass(optimizer_params, lr=self.train_params.lr)
 
         def f_warmup(n):
             if self.train_params.lr_warm_steps > 0:
@@ -289,7 +316,8 @@ class Trainer(pl.LightningModule):
         
         s_warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, f_warmup)
         s_main = self.make_main_scheduler(optimizer)
-        s_full = MyChainedScheduler() if existing_scheduler is None else existing_scheduler
+        s_full = MyChainedScheduler() if existing_scheduler is None else \
+            existing_scheduler
         s_full.setup(optimizer, [s_warmup, s_main],
                     milestones=[self.train_params.lr_warm_steps])
         s_full.step(None)
@@ -301,9 +329,8 @@ class Trainer(pl.LightningModule):
     def get_weight_norms(self):
         total_norm = 0
         for p in self.model.parameters():
-            if p.requires_grad:
-                param_norm = p.data.norm(2)
-                total_norm += param_norm.item() ** 2
+            param_norm = p.data.norm(2)
+            total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
         return total_norm
 
