@@ -246,20 +246,18 @@ class LMDataModule(pl.LightningDataModule):
         if None is not sizes:
             train_n, val_id_n, val_ood_n, test_id_n, test_ood_n = sizes
         else:
-            test_id_n = max(
-                int(self.data_params.test_pct * n_samples / 200), 1)
-            test_ood_n = test_id_n
- 
-            val_id_n = max(
-                int(self.data_params.val_pct * n_samples / 200), 1)
-            val_ood_n = val_id_n
-
-            train_n = n_samples - (test_id_n + test_ood_n + val_id_n + val_ood_n)
-
+            # the logic for this case is not handled yet
+            assert False, "not implemented"
+            test_n = max(
+                int(self.data_params.test_pct * n_samples / 100), 1)
+            val_n = max(
+                int(self.data_params.val_pct * n_samples / 100), 1)
+            train_n = n_samples - (test_n + val_n)
         cond = (test_id_n > 0) and (test_ood_n > 0) and \
             (val_id_n > 0) and (val_ood_n > 0) and (train_n > 0)
-        assert cond, f"lengths: train={train_n}, val_id={val_id_n}, val_ood={val_ood_n}, " \
-                    f"test_id={test_id_n}, test_ood={test_ood_n}"
+        assert cond, f"lengths: test_id_n={test_id_n}, \
+            test_ood_n={test_ood_n}, val_id_n={val_id_n}, \
+                val_ood_n={val_ood_n}<, train_n={train_n}"
 
         return train_n, val_id_n, val_ood_n, test_id_n, test_ood_n
     
