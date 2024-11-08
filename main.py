@@ -160,15 +160,17 @@ def train(args, lm, dataset, tp, dp, saving_folder):
         max_epochs=tp.epochs, val_check_interval=tp.val_check_epoch_frac)
 
     tdl = dataset.train_dataloader(tp.batch_size)
+    vdl_id = dataset.val_id_dataloader(tp.batch_size)
+    vdl_ood = dataset.val_ood_dataloader(tp.batch_size)
     mytrainer = Trainer(lm, tp, 
                         train_dataloader_nbatches=len(tdl), 
                         start_time=start_time)
     mytrainer.prepare_saver(dp, saving_folder, save_model_)
 
     pltrainer.fit(mytrainer, tdl,
-                  dataset.val_dataloader(tp.batch_size))
+                  val_dataloaders = [vdl_id, vdl_ood])
     pltrainer.validate(mytrainer,
-                       dataloaders=dataset.val_dataloader(tp.batch_size))
+                       dataloaders=[vdl_id, vdl_ood])
     # when the val_check_interval does not neatly divide 1, pytorch lightning
     # might not run a validation at the end of the last epoch, which will mess
     # up my saved stats and so make it hard to check a loaded model is behaving

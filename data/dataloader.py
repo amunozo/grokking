@@ -152,7 +152,9 @@ class LMDataModule(pl.LightningDataModule):
             self.prep_for_torch_datasets()
         self.data_params.total_train_samples = len(self.train_samples)
         self.data_params.total_samples = sum([len(ds) for ds in \
-            [self.train_samples, self.val_samples, self.test_samples]])
+            [self.train_samples, 
+            self.val_id_samples, self.val_ood_samples,
+            self.test_id_samples, self.test_ood_samples]])
 
     def set_max_seq_len(self):
         self.max_seq_len = self.model_params.max_seq_len
@@ -198,7 +200,9 @@ class LMDataModule(pl.LightningDataModule):
                 indices[i, :n] = inds
             return lengths, indices
 
-        for sn in ["train_samples", "test_samples", "val_samples"]:
+        for sn in ["train_samples", 
+                   "test_id_samples", "test_ood_samples", 
+                   "val_id_samples", "val_ood_samples"]:
             lengths, indices = arranged(getattr(self, sn))
             setattr(self, sn, ForTorchDataSet(lengths, indices))
 
@@ -223,28 +227,42 @@ class LMDataModule(pl.LightningDataModule):
 
     def setup_from_data_dict(self, samples):
         train_samples = samples["train"]
-        val_samples = samples["validation"]
-        test_samples = samples["test"]
+        val_id_samples = samples["validation_id"]
+        val_ood_samples = samples["validation_ood"]
+        test_id_samples = samples["test_id"]
+        test_ood_samples = samples["test_ood"]
         train_n = len(train_samples)
-        val_n = len(val_samples)
-        test_n = len(test_samples)
-        self.setup_from_list(train_samples + val_samples + test_samples,
-                             (train_n, val_n, test_n),
+        val_id_n = len(val_id_samples)
+        val_ood_n = len(val_ood_samples)
+        test_id_n = len(test_id_samples)
+        test_ood_n = len(test_ood_samples)
+        self.setup_from_list(train_samples + val_id_samples + val_ood_samples
+                              + test_id_samples + test_ood_samples,    
+                             (train_n, val_id_n, val_ood_n, 
+                              test_id_n, test_ood_n),
                              force_no_split_shuffle=True)
 
     def compute_n_full_samples_per_set(self, n_samples, sizes):
         if None is not sizes:
-            train_n, val_n, test_n = sizes
+            train_n, val_id_n, val_ood_n, test_id_n, test_ood_n = sizes
         else:
-            test_n = max(
-                int(self.data_params.test_pct * n_samples / 100), 1)
-            val_n = max(
-                int(self.data_params.val_pct * n_samples / 100), 1)
-            train_n = n_samples - (test_n + val_n)
-        cond = (test_n > 0) and (val_n > 0) and (train_n > 0)
-        assert cond, f"lengths:{test_n},{val_n},{train_n}"
-        return train_n, val_n, test_n
+            test_id_n = max(
+                int(self.data_params.test_pct * n_samples / 200), 1)
+            test_ood_n = test_id_n
+ 
+            val_id_n = max(
+                int(self.data_params.val_pct * n_samples / 200), 1)
+            val_ood_n = val_id_n
 
+            train_n = n_samples - (test_id_n + test_ood_n + val_id_n + val_ood_n)
+
+        cond = (test_id_n > 0) and (test_ood_n > 0) and \
+            (val_id_n > 0) and (val_ood_n > 0) and (train_n > 0)
+        assert cond, f"lengths: train={train_n}, val_id={val_id_n}, val_ood={val_ood_n}, " \
+                    f"test_id={test_id_n}, test_ood={test_ood_n}"
+
+        return train_n, val_id_n, val_ood_n, test_id_n, test_ood_n
+    
     def chunk_long_samples(self, tokenized_data):
         # breaks long samples into samples of length up to
         # self.max_seq_len, so len(res) >= len(tokenized_data)
@@ -279,8 +297,13 @@ class LMDataModule(pl.LightningDataModule):
         if None is not overall_list:
             print(descstr(overall_list, "overall data"))
         
-        named_lists = [(self.train_samples, "train"), (self.val_samples, "val"),
-                        (self.test_samples, "test")]
+        named_lists = [
+            (self.train_samples, "train"), 
+            (self.val_id_samples, "val_id"), 
+            (self.val_ood_samples, "val_ood"),
+            (self.test_id_samples, "test_id"),
+            (self.test_ood_samples, "test_ood")
+        ]    
         for lst, n in named_lists:
             print("\t", descstr(lst, n))
 
@@ -290,21 +313,30 @@ class LMDataModule(pl.LightningDataModule):
         # dataset split, in case i ever want to add one
         n = len(samples)
         data = self.tokenizer(samples)
-        train_n, val_n, test_n = self.compute_n_full_samples_per_set(
-                                        len(samples), sizes)
+        train_n, val_id_n, val_ood_n, test_id_n, test_ood_n = \
+            self.compute_n_full_samples_per_set(len(samples), sizes)
 
         # split without shuffling always for now, and beware of
         # force_no_split_shuffle if want to change later
+        curr_idx = 0
         self.train_samples = data[:train_n]
-        self.val_samples = data[train_n: train_n + val_n]
-        self.test_samples = data[train_n + val_n:]
+        curr_idx += train_n
+        self.val_id_samples = data[curr_idx:curr_idx + val_id_n]
+        curr_idx += val_id_n
+        self.val_ood_samples = data[curr_idx:curr_idx + val_ood_n]
+        curr_idx += val_ood_n
+        self.test_id_samples = data[curr_idx:curr_idx + test_id_n]
+        curr_idx += test_id_n
+        self.test_ood_samples = data[curr_idx:]
         if self.verbose_init:
             print("=== before chunking ===")
             self.print_data_desc(overall_list=data)
 
         self.train_samples = self.chunk_long_samples(self.train_samples)
-        self.val_samples = self.chunk_long_samples(self.val_samples)
-        self.test_samples = self.chunk_long_samples(self.test_samples)
+        self.val_id_samples = self.chunk_long_samples(self.val_id_samples)
+        self.val_ood_samples = self.chunk_long_samples(self.val_ood_samples)
+        self.test_id_samples = self.chunk_long_samples(self.test_id_samples)
+        self.test_ood_samples = self.chunk_long_samples(self.test_ood_samples)
 
         if self.verbose_init:
             print("=== after chunking ===")
@@ -315,8 +347,10 @@ class LMDataModule(pl.LightningDataModule):
     def finalise_data(self):
         # for showing samples
         self.train_n = len(self.train_samples)
-        self.val_n = len(self.val_samples)
-        self.test_n = len(self.test_samples)
+        self.val_id_n = len(self.val_id_samples)
+        self.val_ood_n = len(self.val_ood_samples)
+        self.test_id_n = len(self.test_id_samples)
+        self.test_ood_n = len(self.test_ood_samples)
 
     def print_dataset_lengths(self):
         print(f"train: {self.train_n}, val: {self.val_n}, test: {self.test_n}")
@@ -330,7 +364,9 @@ class LMDataModule(pl.LightningDataModule):
         # - epochs do). i dont need this
 
     def get_sample(self, i):
-        datasets = [self.train_samples, self.val_samples, self.test_samples]
+        datasets = [self.train_samples, 
+                    self.val_id_samples, self.val_ood_samples,
+                    self.test_id_samples, self.test_ood_samples]
         for ds in datasets:
             if i < len(ds):
                 n, indices = ds[i]  # length, indices
@@ -352,8 +388,11 @@ class LMDataModule(pl.LightningDataModule):
         return self.generic_loader(self.train_samples, batch_size,
                                    shuffle=True)
 
-    def val_dataloader(self, batch_size):
-        return self.generic_loader(self.val_samples, batch_size)
+    def val_id_dataloader(self, batch_size):
+        return self.generic_loader(self.val_id_samples, batch_size)
+    
+    def val_ood_dataloader(self, batch_size):
+        return self.generic_loader(self.val_ood_samples, batch_size)
 
     def test_dataloader(self, batch_size):
         return self.generic_loader(self.test_samples, batch_size)

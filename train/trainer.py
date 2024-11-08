@@ -14,7 +14,10 @@ class Trainer(pl.LightningModule):
         self.model = model
         self.train_params = train_params
         self.curr_train_stats_by_type = {"loss": {}, "acc": {}}
-        self.curr_val_stats_by_type = {"loss": {}, "acc": {}}
+        self.curr_val_stats_by_type = {
+            "id" : {"loss": {}, "acc": {}},
+            "ood" : {"loss": {}, "acc": {}}
+            }
         self.this_lm_total_batches = 0
         self.start_time = start_time  # should be obtained with process_time()
         self.n_train_samples = 0
@@ -26,7 +29,8 @@ class Trainer(pl.LightningModule):
         # allows turning sampling off in specific cases,
         # in particular when making trainers for quick validation checks
         # through model_explorer.py
-        self.last_val_loss = None
+        self.last_val_id_loss = None
+        self.last_val_ood_loss = None
         # for reading the val loss after initiating a validation check with
         # lightning, used by model_explorer.py
         self.automatic_optimization = False
@@ -118,19 +122,29 @@ class Trainer(pl.LightningModule):
         # of tokens)
         self.val_count_in_epoch += 1
         self.log_time()
-        main = self.curr_val_stats_by_type["loss"]["main"]
-        for sn in self.curr_val_stats_by_type:
-            d = self.curr_val_stats_by_type[sn]
-            for t, stats in d.items():
-                self.log_stat(f"stat/val_{sn}:{t}", wary_mean(stats))
-            self.curr_val_stats_by_type[sn] = {}
+        val_types = ["id", "ood"]
+        val_metrics = ["loss", "acc"]
+        val_losses = {}
+        for val_type in val_types:
+            for metric in val_metrics:
+                stats = self.curr_val_stats_by_type[val_type][metric].get("main", [])
+                mean_stat = wary_mean(stats)
+                self.log_stat(f"stat/val_{metric}:{val_type}", mean_stat)
+                
+                if metric == "loss":
+                    val_losses[val_type] = mean_stat
+            # Clear stats for next epoch
+            for metric in val_metrics:
+                self.curr_val_stats_by_type[val_type][metric] = {}
 
-        val_loss = wary_mean(main)
+        print(f"\n {'='*20}")
+        print(f"epoch [{self.curr_epoch}] val cycle [{self.val_count_in_epoch}]")
+        print(f"ID val loss: [{val_losses['id']}]")
+        print(f"OOD val loss: [{val_losses['ood']}]")
+        print(f"{'='*20}\n")
 
-        print(f"\n {'='*20} \n epoch [{self.curr_epoch}] val cycle",
-              f"[{self.val_count_in_epoch}] val loss: [{val_loss}]",
-              f"\n {'='*20} \n ")
-        self.last_val_loss = val_loss  # might want this e.g. in model_explorer
+        self.last_val_id_loss = val_losses['id']  # might want this e.g. in model_explorer
+        self.last_val_ood_loss = val_losses['ood']
         if self.samples_at_validation:
             print("=== sampling: ===")
             sample = self.model.sample(
@@ -231,11 +245,17 @@ class Trainer(pl.LightningModule):
             sched.step(self.trainer.callback_metrics["train_batch_loss"])
             self.n_opt_steps += 1
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx):
         la, n_samples = self.model.get_losses(batch, accs_too=True)
+        id2val_type = {0: "id", 1: "ood"}
+        val_type = id2val_type[dataloader_idx]
+        
         for sn in ["loss", "acc"]:
-            self.record_type_stats(la[sn], self.curr_val_stats_by_type[sn],
-                                   stat_name=sn)
+            self.record_type_stats(
+                la[sn],
+                self.curr_val_stats_by_type[val_type][sn],
+                stat_name=f"{sn}_{val_type}"
+            )
         return la["loss"]["main"].item()
 
     def make_main_scheduler(self, optimizer):

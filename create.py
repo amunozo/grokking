@@ -23,7 +23,9 @@ def make_datamodule(data_params, model_params, verbose=True,
         if isinstance(d, list) or isinstance(d, SyntheticSamplesIterator):
             return d
         else:
-            return d["train"] + d["validation"] + d["test"]
+            return (d["train"] 
+                    + d["validation_id"] + d["validation_ood"] +
+                    d["test_id"] + d["test_ood"])
 
     def remove_type_markers(d):
         if isinstance(d[0], tuple):
