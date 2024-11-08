@@ -8,3 +8,4 @@ curr\ todo
 datamodules-paths.txt
 models-paths.txt
 rcplist.sh
+*.ZoneIdentifier
